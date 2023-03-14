@@ -1,8 +1,6 @@
 import copy
-import time
 import torch
 import numpy as np
-# import numpy as np
 import enum
 from torch import Tensor
 from graph_util import feed_forward_layers, get_incoming_connections, get_outgoing_connections, is_valid_connection
@@ -55,7 +53,6 @@ class CPPN():
     
     def __init__(self, n_inputs, n_hidden=0, n_outputs=6, init_connection_prob=0.8, device="cuda:0", deconvs=3, convs=1):
         self.id = CPPN.get_id()
-        # self.rand_key = jax.random.PRNGKey(self.id+10) if rand_key is None else rand_key
         self.conv_layers = []
         if convs > 0:
             input_dims = 3
@@ -96,7 +93,6 @@ class CPPN():
         while next_layer is not None:
             for n in this_layer:
                 for o in next_layer:
-                    # self.rand_key, key = jax.random.split(self.rand_key)
                     r = self.random_uniform(minval=0, maxval=1)
                     if next_layer == self.output_nodes:
                         r = 0.0
@@ -317,16 +313,10 @@ class CPPN():
         plt.show()
             
     def random_uniform(self, minval=-1, maxval=1):
-        # self.rand_key, subkey = jax.random.split(self.rand_key)
-        # return jax.random.uniform(self.rand_key, (1,), minval=minval, maxval=maxval)
         return np.random.uniform(minval, maxval)
     def random_normal(self, sigma=1.0):
-        # self.rand_key, subkey = jax.random.split(self.rand_key)
-        # return jax.random.normal(self.rand_key, (1,)) * sigma
         return np.random.normal(0, sigma)
     def random_activation(self,):
-        # self.rand_key, subkey = jax.random.split(self.rand_key)
-        # idx = jax.random.randint(self.rand_key, (1,), minval=0, maxval=len(ACTIVATIONS))
         idx = np.random.randint(0, len(all_activations))
         return all_activations[idx]
     

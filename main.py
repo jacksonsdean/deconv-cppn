@@ -64,7 +64,7 @@ num_parents = 2
 num_children = 10
 elitism = 1
 evo_iters = 100
-sgd_iters = 20
+sgd_iters = 100
 LR = .03
 
 evo_pbar = trange(evo_iters)
