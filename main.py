@@ -7,7 +7,7 @@ from tqdm import trange
 import os
 import imageio.v2 as imageio
 import cv2
-from deconv_torch_cppn import CPPN
+from deconv_cppn import CPPN
 from torch import Tensor
 import torch.optim as optim
 import torch
