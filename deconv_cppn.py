@@ -114,14 +114,10 @@ class CPPN():
                 self.nodes[node_id].layer = layer_index + 1
         
     def random_node(self):
-        # self.rand_key, subkey = jax.random.split(self.rand_key)
-        # idx = jax.random.randint(self.rand_key, (1,), minval=0, maxval=len(self.nodes))
         idx = np.random.randint(0, len(self.nodes))
         return self.nodes[list(self.nodes.keys())[idx]]
     
     def random_connection(self):
-        # self.rand_key, subkey = jax.random.split(self.rand_key)
-        # idx = jax.random.randint(self.rand_key, (1,), minval=0, maxval=len(self.connections))
         idx = np.random.randint(0, len(self.connections))
         return self.connections[list(self.connections.keys())[idx]]
     
@@ -203,8 +199,6 @@ class CPPN():
     def mutate_weights(self, prob):
         with torch.no_grad():
             for _, c in self.connections.items():
-                # self.rand_key, key = jax.random.split(self.rand_key)
-                # r = jax.random.uniform(self.rand_key, (1,), minval=0, maxval=1)
                 r = np.random.uniform(0,1)
                 if r < prob:
                     c.weight += self.random_normal()
@@ -214,8 +208,6 @@ class CPPN():
                 
     def mutate_activations(self, prob):
         for _, n in self.nodes.items():
-            # self.rand_key, key = jax.random.split(self.rand_key)
-            # r = jax.random.uniform(self.rand_key, (1,), minval=0, maxval=1)
             r = np.random.uniform(0,1)
             if r < prob:
                 n.fn = self.random_activation()
@@ -263,30 +255,25 @@ class CPPN():
         for conv_layer in self.conv_layers:
             inputs = conv_layer(inputs)
         
-        # t = time.time()
         self.reset_activations(inputs)
-        # return [inputs[0] * self.enabled_connections[0].weight, inputs[1] * self.enabled_connections[0].weight, inputs[2] * self.enabled_connections[0].weight]         
+        
         for idx, input_node in enumerate(self.input_nodes):
             input_node.value = inputs[idx]
-            # print(input_node.value)
-            # getattr(input_node.value, input_node.fn)() # activation
-        
+            # input_node.value = input_node.fn(input_node.value)
+                    
         if self.layers is None: 
             self.layers = feed_forward_layers(self)
             
         for layer in self.layers:
             for node_id in layer:
                 node = self.nodes[node_id]
-                # node.value = torch.zeros(inputs.shape[1:]).to("cuda:0")
                 if node.incoming is None:
                     node.incoming = get_incoming_connections(self, node)
                 for cxn in node.incoming:
-                    # print(cxn.weight)
                     node.value = node.value + self.nodes[cxn.id[0]].value * cxn.weight  + node.bias
-                # getattr(node.value, node.fn)() # activation
                 node.value = node.fn(node.value)
+                
         sorted_outputs = sorted(self.output_nodes, key=lambda n: n.id)
-        # print("forward time", time.time() - t)
         latent = torch.stack([s.value for s in sorted_outputs])
         for i in range(len(self.deconv_layers)):
             latent = self.deconv_layers[i](latent)
