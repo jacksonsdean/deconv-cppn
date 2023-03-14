@@ -41,14 +41,14 @@ scale = 10.0
 B_gauss = np.random.randn(mapping_size, 2)
 B_gauss = B_gauss * scale
 
-num_deconvs = 1
+num_downscales = 1
 
 coords = np.linspace(0, 1, img.shape[0], endpoint=False)
 x_test = np.stack(np.meshgrid(coords, coords), -1)
 train_downscale = 8
 test_data = [x_test, img]
-train_data = [x_test[::2**num_deconvs, ::2**num_deconvs],
-              img[::2**num_deconvs, ::2**num_deconvs]]
+train_data = [x_test[::2**num_downscales, ::2**num_downscales],
+              img[::2**num_downscales, ::2**num_downscales]]
 
 X = input_mapping(train_data[0], B_gauss)
 X = X.transpose(2, 0, 1)
@@ -106,9 +106,17 @@ def select(children):
     # return trunc_select(children)
     return tourn_select(children)
 
+convs = [(-1, 3)]
+strides = [1]
+
 losses = []
 parents = [
-    CPPN(mapping_size*2, 0, 32, 0.80, deconvs=num_deconvs, convs=1) for _ in range(num_parents)
+    CPPN(
+        mapping_size*2, 0, 32, 0.80, 
+        n_deconvs=num_downscales+(sum(strides)-len(strides)), 
+        convs=convs,
+        strides = strides,
+        ) for _ in range(num_parents)
 ]
 try:
     for e in evo_pbar:

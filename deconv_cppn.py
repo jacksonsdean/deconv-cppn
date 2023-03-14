@@ -51,22 +51,24 @@ class CPPN():
             all_vals.append(np.ones(all_vals[0].shape))
         return np.stack(all_vals, axis=0)
     
-    def __init__(self, n_inputs, n_hidden=0, n_outputs=6, init_connection_prob=0.8, device="cuda:0", deconvs=3, convs=1):
+    def __init__(self, n_inputs, n_hidden=0, n_outputs=6, init_connection_prob=0.8, device="cuda:0", n_deconvs=3, convs=[(-1, 3)], strides=[2]):
         self.id = CPPN.get_id()
         self.conv_layers = []
-        if convs > 0:
-            input_dims = 3
-            self.conv_layers.append(Conv2d(n_inputs,input_dims,3, stride=1, padding=1,device=device))
-            for _ in range(convs-1):
-                self.conv_layers.append(Conv2d(input_dims,3,3, stride=1, padding=1,device=device))
-            n_inputs = input_dims
+        if convs is not None and len(convs) > 0:
+            for i in range(len(convs)):
+                in_dims = convs[i][0]
+                if in_dims == -1:
+                    in_dims = n_inputs
+                out_dims = convs[i][1]
+                self.conv_layers.append(Conv2d(in_dims,out_dims,3, stride=strides[i], padding=1,device=device))
+            n_inputs = out_dims
         self.init_genome(n_inputs, n_hidden, n_outputs, init_connection_prob)
         self.device = device
         self.layers = None
         self.deconv_layers = []
-        if deconvs > 0:
+        if n_deconvs > 0:
             self.deconv_layers.append(ConvTranspose2d(n_outputs,3,3, stride=2, padding=1, output_padding=1,device=device))
-            for _ in range(deconvs-1):
+            for _ in range(n_deconvs-1):
                 self.deconv_layers.append(ConvTranspose2d(3,3,3, stride=2, padding=1, output_padding=1,device=device))
         
     def init_genome(self, n_inputs, n_hidden, n_outputs, init_connection_prob):
