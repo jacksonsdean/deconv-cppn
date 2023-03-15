@@ -18,8 +18,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 np.random.seed(0)
 res = 512
 # Download image, take a square crop from the center
-image_url = 'https://live.staticflickr.com/7492/15677707699_d9d67acf9d_b.jpg'
-# image_url = 'https://upload.wikimedia.org/wikipedia/commons/1/1e/Sunrise_over_the_sea.jpg'
+# image_url = 'https://live.staticflickr.com/7492/15677707699_d9d67acf9d_b.jpg'
+image_url = 'https://upload.wikimedia.org/wikipedia/commons/1/1e/Sunrise_over_the_sea.jpg'
 img = imageio.imread(image_url)[..., :3] / 255.
 if min(img.shape[:2]) < res:
     img = cv2.resize(img, (res, res))
@@ -36,19 +36,20 @@ def input_mapping(x, B):
     x_proj = (2.*np.pi*x) @ B.T
     return np.concatenate([np.sin(x_proj), np.cos(x_proj)], axis=-1)
 
-mapping_size = 256
-scale = 10.0
+mapping_size = 512
+scale = 8.0
 B_gauss = np.random.randn(mapping_size, 2)
 B_gauss = B_gauss * scale
 
-num_downscales = 1
+train_downscales = 2
 
 coords = np.linspace(0, 1, img.shape[0], endpoint=False)
 x_test = np.stack(np.meshgrid(coords, coords), -1)
-train_downscale = 8
+train_downscale = 3
 test_data = [x_test, img]
-train_data = [x_test[::2**num_downscales, ::2**num_downscales],
-              img[::2**num_downscales, ::2**num_downscales]]
+train_data = [x_test[::2**train_downscales, ::2**train_downscales],
+              img[::2**train_downscales, ::2**train_downscales]]
+# train_data = [x_test, img]
 
 X = input_mapping(train_data[0], B_gauss)
 X = X.transpose(2, 0, 1)
@@ -60,12 +61,12 @@ print("target shape", target.shape)
 X = Tensor(np.array(X.astype(np.float32))).to(DEVICE)
 
 
-num_parents = 2
+num_parents = 1
 num_children = 10
-elitism = 1
+elitism = 0
 evo_iters = 100
 sgd_iters = 100
-LR = .03
+LR = .01
 
 evo_pbar = trange(evo_iters)
 
@@ -86,49 +87,54 @@ def reproduce(nets):
     return children
 
 def trunc_select(children):
-    children = [(child, loss_fn(child(X))) for child in children]
-    children = sorted(children, key=lambda x: x[1])
+    children = sorted(children, key=lambda x: x.loss)
     parents = children[:num_parents]
-    return [p[0] for p in parents]
+    return parents
 
 tourn_size = 3
 tourn_winners = 1
 def tourn_select(children):
-    children = [(child, loss_fn(child(X)).item()) for child in children]
     winners = []
     while len(winners) < num_parents:
         rand_children_idxs = np.random.choice(len(children), tourn_size, replace=False)
-        rand_children = sorted([children[i] for i in rand_children_idxs], key=lambda x: x[1])
+        rand_children = sorted([children[i] for i in rand_children_idxs], key=lambda x: x.loss)
         winners.extend(rand_children[:tourn_winners])
-    return [p[0] for p in winners]
+    return winners
         
 def select(children):
-    # return trunc_select(children)
-    return tourn_select(children)
+    return trunc_select(children)
+    # return tourn_select(children)
 
-convs = [(-1, 3)]
-strides = [1]
-
-losses = []
+convs = [(-1,3)]
+strides = [2] 
+num_devices = 1
 parents = [
     CPPN(
-        mapping_size*2, 0, 32, 0.80, 
-        n_deconvs=num_downscales+(sum(strides)-len(strides)), 
+        mapping_size*2, 6, 6, 0.80, 
+        n_deconvs=train_downscales + int(sum(np.log2(strides))),
         convs=convs,
         strides = strides,
-        ) for _ in range(num_parents)
+        device=f"cuda:" + str(i % num_devices),
+        ) for i in range(num_parents)
 ]
+
+best = parents[0]
+losses = []
 try:
     for e in evo_pbar:
         children = reproduce(parents)
         sgd_pbar = trange(sgd_iters, leave=False)
         all_params = []
-        for child in children:
+        for i, child in enumerate(children):
+            child.to(f"cuda:" + str(i % num_devices))
             all_params += list(child.params)
         optimizer = optim.Adam(all_params, lr=LR)
         for k in sgd_pbar:
-            Ys = torch.stack([net(X) for net in children])
-            loss = torch.stack([loss_fn(y) for y in Ys]).mean()
+            Ys = torch.stack([net(X).to(DEVICE) for net in children])
+            child_losses = [loss_fn(y) for y in Ys]
+            for i, child in enumerate(children):
+                child.loss = child_losses[i].item()
+            loss = torch.stack(child_losses).mean()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -137,20 +143,25 @@ try:
                 f"loss: {loss.detach().cpu().numpy().mean():.4f}, {ms_per_iter:.1f} ms/iter")
             losses.append(loss.item())
         parents = select(children)
-        evo_pbar.set_description(f"loss: {losses[-1]:.4f} top_id: {parents[0].id} num_params: {parents[0].num_params}")
+        
+        if parents[0].loss < best.loss:
+            best = parents[0].clone(new_id=False)
+        evo_pbar.set_description(f"loss: {best.loss:.4f} best: [id:{best.id} params:{best.num_params}]")
+        
 except KeyboardInterrupt:
-    children = [(child, loss_fn(child(X))) for child in children]
-    children = sorted(children, key=lambda x: x[1])
-    parent = children[:num_parents]
+    # children = [(parents[0], loss_fn(parents[0](X)))] + [(child, loss_fn(child(X))) for child in children]
+    # children = sorted(children, key=lambda x: x[1])
+    # parents = children[:num_parents]
+    # parents = [p[0] for p in parents]
     pass    
 plt.plot(losses)
 plt.show()
 
-output = parents[0](X)
+output = best(X)
 
-print("final num params:", parents[0].num_params)
-p = parents[0].num_params_by_module
-print("num params:", "cppn:", p[0], 'conv:', p[1], 'deconv:', p[2], 'total:', parents[0].num_params)
+print("final num params:", best.num_params)
+p = best.num_params_by_module
+print("num params:", "cppn:", p[0], 'conv:', p[1], 'deconv:', p[2], 'total:', best.num_params)
 print("final loss:", loss_fn(output).detach().cpu().numpy().mean())
 
 # parent.draw_nx()

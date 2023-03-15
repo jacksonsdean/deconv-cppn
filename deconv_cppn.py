@@ -14,22 +14,22 @@ class NodeType(enum.Enum):
     HIDDEN = 3
 
 class Node():
-    def __init__(self, id, type:NodeType, fn:callable,layer=None):
+    def __init__(self, id, type:NodeType, fn:callable,layer=None,device="cpu"):
         self.id = id
         self.type = type
         self.value = 0
         self.connections = {}
         self.fn = fn
         self.value = None
-        self.bias = Tensor([0.0]).to("cuda:0")
+        self.bias = Tensor([0.0]).to(device)
         self.incoming = None
         self.layer = layer
         
 
 class Connection():
-    def __init__(self, in_node, out_node, weight):
+    def __init__(self, in_node, out_node, weight, device="cpu"):
         self.id = (in_node.id, out_node.id)
-        self.weight = Tensor([weight]).to("cuda:0")
+        self.weight = Tensor([weight]).to(device)
         self.weight.requires_grad = True
         self.enabled = True
 
@@ -51,7 +51,8 @@ class CPPN():
             all_vals.append(np.ones(all_vals[0].shape))
         return np.stack(all_vals, axis=0)
     
-    def __init__(self, n_inputs, n_hidden=0, n_outputs=6, init_connection_prob=0.8, device="cuda:0", n_deconvs=3, convs=[(-1, 3)], strides=[2]):
+    def __init__(self, n_inputs, n_hidden=0, n_outputs=6, init_connection_prob=0.8, device="cpu", n_deconvs=3, convs=[(-1, 3)], strides=[2]):
+        self.device = device
         self.id = CPPN.get_id()
         self.conv_layers = []
         if convs is not None and len(convs) > 0:
@@ -63,9 +64,9 @@ class CPPN():
                 self.conv_layers.append(Conv2d(in_dims,out_dims,3, stride=strides[i], padding=1,device=device))
             n_inputs = out_dims
         self.init_genome(n_inputs, n_hidden, n_outputs, init_connection_prob)
-        self.device = device
         self.layers = None
         self.deconv_layers = []
+        self.loss = torch.inf
         if n_deconvs > 0:
             self.deconv_layers.append(ConvTranspose2d(n_outputs,3,3, stride=2, padding=1, output_padding=1,device=device))
             for _ in range(n_deconvs-1):
@@ -81,12 +82,12 @@ class CPPN():
     def init_nodes(self, n_inputs, n_outputs, n_hidden):
         for i in range(n_inputs):
             id = -i-1
-            self.nodes[id] = Node(id, NodeType.INPUT, self.random_activation(), layer=0)
+            self.nodes[id] = Node(id, NodeType.INPUT, self.random_activation(), layer=0,device=self.device)
         for i in range(n_outputs):
             id = -n_inputs-i-1
-            self.nodes[id] = Node(id, NodeType.OUTPUT, self.random_activation(), layer=1)
+            self.nodes[id] = Node(id, NodeType.OUTPUT, self.random_activation(), layer=1,device=self.device)
         for i in range(n_hidden):
-            self.nodes[i] = Node(i, NodeType.HIDDEN, self.random_activation(), layer=2)
+            self.nodes[i] = Node(i, NodeType.HIDDEN, self.random_activation(), layer=2,device=self.device)
         self.update_node_layers()
 
     def init_connections(self,c_prob):
@@ -131,7 +132,7 @@ class CPPN():
                 node2 = self.random_node()
             if not is_valid_connection(self.nodes, (node1.id, node2.id)):
                 continue
-            c = Connection(node1, node2, self.random_uniform() if weight is None else weight)
+            c = Connection(node1, node2, self.random_uniform() if weight is None else weight,device=self.device)
             self.connections[c.id] = c
             self.update_node_layers()
             break
@@ -146,7 +147,7 @@ class CPPN():
         if not c.enabled:
             return
         c.enabled = False
-        new_node = Node(max([n for n in self.nodes.keys()])+1, NodeType.HIDDEN, self.random_activation())
+        new_node = Node(max([n for n in self.nodes.keys()])+1, NodeType.HIDDEN, self.random_activation(),device=self.device)
         self.nodes[new_node.id] = new_node
         self.add_connection(self.nodes[c.id[0]], new_node, weight=1.0)
         self.add_connection(new_node, self.nodes[c.id[1]])
@@ -250,10 +251,23 @@ class CPPN():
         if inputs is None:
             inputs = self.get_constant_inputs([1,1])
         for n in self.nodes.values():
-            n.value = torch.zeros(inputs.shape[1:]).to("cuda:0")
-
+            n.value = torch.zeros(inputs.shape[1:]).to(self.device)
+    
+    def to(self, device):
+        self.device = device
+        for i, l in enumerate(self.conv_layers):
+            self.conv_layers[i] = l.to(device)
+        for i, l in enumerate(self.deconv_layers):
+            self.deconv_layers[i] = l.to(device)
+        for n in self.nodes.values():
+            n.bias = n.bias.to(device)
+            if n.value is not None:
+                n.value = n.value.to(device)
+        for c in self.connections.values():
+            c.weight = torch.tensor(c.weight.item()).to(device)
     
     def forward(self, inputs):
+        inputs = inputs.to(self.device)
         for conv_layer in self.conv_layers:
             inputs = conv_layer(inputs)
         
