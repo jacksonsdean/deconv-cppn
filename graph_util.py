@@ -11,9 +11,10 @@ def is_valid_connection(nodes, key:tuple):
     from_node, to_node = nodes[from_node], nodes[to_node]
     if from_node == to_node:
         return False
-    if from_node.layer == to_node.layer:
-        return False  # don't allow two nodes on the same layer to connect
-
+    if from_node.layer is None or to_node.layer is None:
+        return True # not in layer structure 
+    if from_node.layer >= to_node.layer:
+        return False # no recurrent connections
     return True
 
 

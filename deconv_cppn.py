@@ -6,7 +6,20 @@ from torch import Tensor
 from graph_util import feed_forward_layers, get_incoming_connections, get_outgoing_connections, is_valid_connection
 from networkx.drawing.nx_agraph import graphviz_layout
 from torch_activations import all_activations
-from torch.nn import ConvTranspose2d, Conv2d
+from torch.nn import ConvTranspose2d, Conv2d, Sequential, Upsample, ReflectionPad2d,MaxPool2d   
+
+
+def upscale_conv2d(in_channels, out_channels, kernel_size, stride, padding, device="cpu"):
+    # return ConvTranspose2d(in_channels,out_channels,kernel_size, stride=stride, padding=padding, output_padding=1,device=device)
+    layer = Sequential(
+        Upsample(scale_factor=2, mode='bilinear'),
+        ReflectionPad2d(1),
+        Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=1, padding=0, device=device)
+   )
+    layer.__dict__['kernel_size'] = kernel_size
+    layer.__dict__['in_channels'] = in_channels
+    return layer
+
 
 class NodeType(enum.Enum):
     INPUT  = 0
@@ -51,10 +64,11 @@ class CPPN():
             all_vals.append(np.ones(all_vals[0].shape))
         return np.stack(all_vals, axis=0)
     
-    def __init__(self, n_inputs, n_hidden=0, n_outputs=6, init_connection_prob=0.8, device="cpu", n_deconvs=3, convs=[(-1, 3)], strides=[2]):
-        self.device = device
+    def __init__(self, n_inputs, n_hidden=0, n_outputs=6, init_connection_prob=0.8, device="cpu", n_upsamples=3, convs=[(-1, 3)], strides=[2], pools=None, without_conv=False):
+        self.device = torch.device(device)
         self.id = CPPN.get_id()
         self.conv_layers = []
+        assert pools is None or len(pools) == len(convs), "pools must be same length as convs for now"
         if convs is not None and len(convs) > 0:
             for i in range(len(convs)):
                 in_dims = convs[i][0]
@@ -62,15 +76,57 @@ class CPPN():
                     in_dims = n_inputs
                 out_dims = convs[i][1]
                 self.conv_layers.append(Conv2d(in_dims,out_dims,3, stride=strides[i], padding=1,device=device))
+                if pools is not None:
+                    self.conv_layers.append(MaxPool2d(pools[i]))
+                    self.conv_layers[-1].__dict__['in_channels'] = f' POOL{pools[i]}'
             n_inputs = out_dims
+        self.hidden_dim = n_inputs
         self.init_genome(n_inputs, n_hidden, n_outputs, init_connection_prob)
         self.layers = None
         self.deconv_layers = []
         self.loss = torch.inf
-        if n_deconvs > 0:
-            self.deconv_layers.append(ConvTranspose2d(n_outputs,3,3, stride=2, padding=1, output_padding=1,device=device))
-            for _ in range(n_deconvs-1):
-                self.deconv_layers.append(ConvTranspose2d(3,3,3, stride=2, padding=1, output_padding=1,device=device))
+        if without_conv:
+            for _ in range(n_upsamples):
+                self.deconv_layers.append(Upsample(scale_factor=2, mode='bilinear'))
+                self.deconv_layers[-1].__dict__['kernel_size'] = ' '
+                self.deconv_layers[-1].__dict__['in_channels'] = 2
+        else:
+            if n_upsamples > 0:
+                self.deconv_layers.append(upscale_conv2d(n_outputs,3,3, stride=2, padding=1, device=device))
+                for _ in range(n_upsamples-1):
+                    self.deconv_layers.append(upscale_conv2d(3,3,3, stride=2, padding=1, device=device))
+            
+    def forward(self, inputs):
+        inputs = inputs.to(self.device)
+        for conv_layer in self.conv_layers:
+            inputs = conv_layer(inputs)
+        
+        self.reset_activations(inputs)
+        
+        for idx, input_node in enumerate(self.input_nodes):
+            input_node.value = inputs[idx]
+            # input_node.value = input_node.fn(input_node.value)
+
+        if self.layers is None: 
+            self.layers = feed_forward_layers(self)
+            
+        for layer in self.layers:
+            for node_id in layer:
+                node = self.nodes[node_id]
+                if node.incoming is None:
+                    node.incoming = get_incoming_connections(self, node)
+                for cxn in node.incoming:
+                    node.value = node.value + self.nodes[cxn.id[0]].value * cxn.weight  + node.bias
+                node.value = node.fn(node.value)
+                
+        sorted_outputs = sorted(self.output_nodes, key=lambda n: n.id)
+        latent = torch.stack([s.value for s in sorted_outputs])
+        for i in range(len(self.deconv_layers)):
+            latent = latent.unsqueeze(0)
+            latent = self.deconv_layers[i](latent)
+            latent = latent.squeeze(0)
+        latent = torch.sigmoid(latent)
+        return latent
         
     def init_genome(self, n_inputs, n_hidden, n_outputs, init_connection_prob):
         self.nodes = {}
@@ -85,9 +141,9 @@ class CPPN():
             self.nodes[id] = Node(id, NodeType.INPUT, self.random_activation(), layer=0,device=self.device)
         for i in range(n_outputs):
             id = -n_inputs-i-1
-            self.nodes[id] = Node(id, NodeType.OUTPUT, self.random_activation(), layer=1,device=self.device)
+            self.nodes[id] = Node(id, NodeType.OUTPUT, self.random_activation(), layer=2,device=self.device)
         for i in range(n_hidden):
-            self.nodes[i] = Node(i, NodeType.HIDDEN, self.random_activation(), layer=2,device=self.device)
+            self.nodes[i] = Node(i, NodeType.HIDDEN, self.random_activation(), layer=1, device=self.device)
         self.update_node_layers()
 
     def init_connections(self,c_prob):
@@ -115,6 +171,8 @@ class CPPN():
         for layer_index, layer in enumerate(self.layers):
             for node_id in layer:
                 self.nodes[node_id].layer = layer_index + 1
+        for node in self.nodes.values():
+            node.incoming = get_incoming_connections(self, node)
         
     def random_node(self):
         idx = np.random.randint(0, len(self.nodes))
@@ -125,6 +183,7 @@ class CPPN():
         return self.connections[list(self.connections.keys())[idx]]
     
     def add_connection(self, node1=None, node2=None, weight=None):
+        self.update_node_layers()
         for _ in range(20):
             if node1 is None:
                 node1 = self.random_node()
@@ -200,14 +259,13 @@ class CPPN():
         return [c for c in self.connections.values() if c.enabled]
     
     def mutate_weights(self, prob):
-        with torch.no_grad():
-            for _, c in self.connections.items():
-                r = np.random.uniform(0,1)
-                if r < prob:
-                    c.weight += self.random_normal()
-            for n in self.nodes.values():
-                n.incoming=None
-                self.layers=None
+        for _, c in self.connections.items():
+            r = np.random.uniform(0,1)
+            if r < prob:
+                c.weight = c.weight.detach() + self.random_normal()
+        for n in self.nodes.values():
+            n.incoming=None
+            self.layers=None
                 
     def mutate_activations(self, prob):
         for _, n in self.nodes.items():
@@ -222,7 +280,7 @@ class CPPN():
             remove_node = 0.1,
             disable_connection = 0.1,
             mutate_activations = .1,
-            mutate_weights = 0.0):
+            mutate_weights = 0.01):
         
         if self.random_uniform(0.0,1.0) < add_node:
             self.add_node()
@@ -240,11 +298,26 @@ class CPPN():
     def to_nx(self):
         import networkx as nx
         G = nx.DiGraph()
+        for i, layer in enumerate(self.conv_layers):
+            G.add_node(f'CONV {i}\n{layer.kernel_size}x{layer.in_channels}', type='conv')
+        for i, layer in enumerate(self.deconv_layers):
+            G.add_node(f'UPSAMPLE {i}\n{layer.kernel_size}x{layer.in_channels}', type='deconv')
+            
+        for i in range(len(self.conv_layers)-1):
+            G.add_edge(f'CONV {i}\n{self.conv_layers[i].kernel_size}x{self.conv_layers[i].in_channels}', f'CONV {i+1}\n{self.conv_layers[i+1].kernel_size}x{self.conv_layers[i+1].in_channels}')
+        for i in range(len(self.deconv_layers)-1):
+            G.add_edge(f'UPSAMPLE {i}\n{self.deconv_layers[i].kernel_size}x{self.deconv_layers[i].in_channels}', f'UPSAMPLE {i+1}\n{self.deconv_layers[i+1].kernel_size}x{self.deconv_layers[i+1].in_channels}')
+        
         for n in self.nodes.values():
             G.add_node(n.id, type=n.type.name, fn=n.fn)
         for c in self.connections.values():
             if c.enabled:
-                G.add_edge(c.id[0], c.id[1], weight=c.weight)
+                G.add_edge(c.id[0], c.id[1], weight=c.weight.item())
+        if len(self.conv_layers) > 0:
+            for n in self.input_nodes:
+                G.add_edge(f"CONV {len(self.conv_layers)-1}\n{self.conv_layers[-1].kernel_size}x{self.conv_layers[-1].in_channels}", n.id)
+        for n in self.output_nodes:
+            G.add_edge(n.id, f"UPSAMPLE 0\n{self.deconv_layers[0].kernel_size}x{self.deconv_layers[0].in_channels}")
         return G
     
     def reset_activations(self, inputs=None):
@@ -265,37 +338,8 @@ class CPPN():
                 n.value = n.value.to(device)
         for c in self.connections.values():
             c.weight = torch.tensor(c.weight.item()).to(device)
-    
-    def forward(self, inputs):
-        inputs = inputs.to(self.device)
-        for conv_layer in self.conv_layers:
-            inputs = conv_layer(inputs)
-        
-        self.reset_activations(inputs)
-        
-        for idx, input_node in enumerate(self.input_nodes):
-            input_node.value = inputs[idx]
-            # input_node.value = input_node.fn(input_node.value)
-                    
-        if self.layers is None: 
-            self.layers = feed_forward_layers(self)
-            
-        for layer in self.layers:
-            for node_id in layer:
-                node = self.nodes[node_id]
-                if node.incoming is None:
-                    node.incoming = get_incoming_connections(self, node)
-                for cxn in node.incoming:
-                    node.value = node.value + self.nodes[cxn.id[0]].value * cxn.weight  + node.bias
-                node.value = node.fn(node.value)
-                
-        sorted_outputs = sorted(self.output_nodes, key=lambda n: n.id)
-        latent = torch.stack([s.value for s in sorted_outputs])
-        for i in range(len(self.deconv_layers)):
-            latent = self.deconv_layers[i](latent)
-        latent = torch.sigmoid(latent)
-        return latent
-    
+            c.weight.requires_grad = True
+
     def __call__(self, X):
         return self.forward(X)
     
@@ -309,10 +353,14 @@ class CPPN():
             G,
             with_labels=True,
             pos=pos,
-            labels={n:f"{n}\n{self.nodes[n].fn.__name__[:4]}" for n in G.nodes()},
-            node_size=300,
-            font_size=8,
+            labels={n:f"{n}\n{self.nodes[n].fn.__name__[:4]}\n{self.hidden_dim}xHxW"if n in self.nodes else n
+                    for n in G.nodes(data=False) },
+            node_size=800,
+            font_size=6,
+            node_shape='s',
+            node_color=['lightsteelblue' if n in self.nodes else 'lightgreen' for n in G.nodes()  ]
             )
+        plt.annotate('# params: ' + str(self.num_params), xy=(1.0, 1.0), xycoords='axes fraction', fontsize=12, ha='right', va='top')
         plt.show()
             
     def random_uniform(self, minval=-1, maxval=1):
@@ -326,7 +374,7 @@ class CPPN():
     def clone(self, new_id=True):
         """ Create a copy of this genome. """
         for p in self.params:
-            p.detach()
+            p = p.detach()
         for _, n in self.nodes.items():
             n.value = None
         id = self.id if (not new_id) else type(self).get_id()
